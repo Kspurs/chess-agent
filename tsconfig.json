@@ -1,0 +1,19 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared-types" },
+    { "path": "./packages/chess-domain" },
+    { "path": "./packages/event-protocol" },
+    { "path": "./packages/platform-adapter" },
+    { "path": "./packages/agent-tools" },
+    { "path": "./packages/agent-runtime" },
+    { "path": "./services/engine" },
+    { "path": "./services/review" },
+    { "path": "./services/puzzle" },
+    { "path": "./apps/api" },
+    { "path": "./apps/cli" },
+    { "path": "./apps/web" },
+    { "path": "./apps/desktop" }
+  ]
+}
+
