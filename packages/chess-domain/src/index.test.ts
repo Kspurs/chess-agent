@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ChessRules, IllegalMoveError, opposite, parseFen, parseUciMove } from "./index.js";
+import { ChessRules, IllegalMoveError, opposite, parseFen, parseUciMove, validatePgn } from "./index.js";
 
 describe("chess value parsing", () => {
   it("accepts valid UCI moves and FEN values", () => {
@@ -15,6 +15,11 @@ describe("chess value parsing", () => {
   it("returns the opposite color", () => {
     expect(opposite("white")).toBe("black");
     expect(opposite("black")).toBe("white");
+  });
+
+  it("validates PGN", () => {
+    expect(validatePgn("1. e4 e5 2. Nf3 *")).toContain("e4");
+    expect(() => validatePgn("not a game")).toThrow(TypeError);
   });
 });
 

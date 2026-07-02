@@ -13,7 +13,7 @@
     { "path": "./apps/api" },
     { "path": "./apps/cli" },
     { "path": "./apps/web" },
-    { "path": "./apps/desktop" }
+    { "path": "./apps/desktop" },
+    { "path": "./evaluations" }
   ]
 }
-

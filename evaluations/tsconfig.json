@@ -1,0 +1,2 @@
+{"extends":"../tsconfig.base.json","compilerOptions":{"rootDir":".","outDir":"../dist/evaluations"},"references":[{"path":"../packages/shared-types"},{"path":"../packages/chess-domain"},{"path":"../packages/platform-adapter"},{"path":"../packages/agent-tools"},{"path":"../packages/agent-runtime"}],"include":["**/*.ts"]}
+

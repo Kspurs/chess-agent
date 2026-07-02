@@ -1,1 +1,1 @@
-{"extends":"../../tsconfig.base.json","compilerOptions":{"rootDir":"src","outDir":"dist"},"include":["src/**/*.ts"]}
+{"extends":"../../tsconfig.base.json","compilerOptions":{"rootDir":"src","outDir":"dist"},"references":[{"path":"../../packages/shared-types"},{"path":"../../packages/chess-domain"},{"path":"../../packages/platform-adapter"},{"path":"../engine"}],"include":["src/**/*.ts"]}

@@ -2,7 +2,7 @@ import type { GameId, UserId } from "@chess-agent/shared-types";
 import { Chess, validateFen } from "chess.js";
 
 export type Color = "white" | "black";
-export type GameStatus = "created" | "started" | "checkmate" | "stalemate" | "draw" | "resigned" | "aborted";
+export type GameStatus = "created" | "started" | "checkmate" | "stalemate" | "draw" | "resigned" | "aborted" | "finished";
 export type GameResult = "1-0" | "0-1" | "1/2-1/2" | "*";
 export type GameMode = "human" | "computer";
 export type San = string & { readonly __brand: "San" };
@@ -159,6 +159,17 @@ export function parseFen(value: unknown): Fen {
 
 export function opposite(color: Color): Color {
   return color === "white" ? "black" : "white";
+}
+
+export function validatePgn(value: unknown): Pgn {
+  if (typeof value !== "string" || value.trim().length === 0) throw new TypeError("PGN must be a non-empty string");
+  try {
+    const chess = new Chess();
+    chess.loadPgn(value, { strict: false });
+  } catch (error) {
+    throw new TypeError("invalid PGN", { cause: error });
+  }
+  return value as Pgn;
 }
 
 function validRank(rank: string): boolean {

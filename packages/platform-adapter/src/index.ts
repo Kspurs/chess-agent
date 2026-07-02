@@ -14,6 +14,7 @@ export interface CreateGameOptions {
   readonly color: Color;
   readonly initialMs?: number;
   readonly incrementMs?: number;
+  readonly computerLevel?: number;
 }
 
 export interface VersionedGame {
@@ -161,4 +162,6 @@ export class InMemoryChessPlatform implements ChessPlatform {
 export function fenOf(game: VersionedGame): Fen {
   return game.game.currentFen;
 }
+
+export * from "./lichess.js";
 

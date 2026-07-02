@@ -27,6 +27,7 @@ export type PlatformEvent =
   | EventEnvelope<"game.completed", { readonly gameId: GameId; readonly result: string }>
   | EventEnvelope<"analysis.progress", { readonly jobId: JobId; readonly progress: number }>
   | EventEnvelope<"analysis.completed", { readonly jobId: JobId; readonly reviewId: ReviewId }>
+  | EventEnvelope<"puzzle.started", { readonly puzzleId: PuzzleId; readonly fen: string; readonly rating: number; readonly themes: readonly string[] }>
   | EventEnvelope<"puzzle.feedback", { readonly puzzleId: PuzzleId; readonly correct: boolean; readonly message: string }>
   | EventEnvelope<"ui.open_panel", { readonly panel: "game" | "review" | "puzzle"; readonly resourceId: string }>;
 
@@ -56,6 +57,7 @@ const EVENT_TYPES = new Set<PlatformEvent["type"]>([
   "game.completed",
   "analysis.progress",
   "analysis.completed",
+  "puzzle.started",
   "puzzle.feedback",
   "ui.open_panel"
 ]);

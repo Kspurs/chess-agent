@@ -1,0 +1,1 @@
+{"name":"@chess-agent/evaluations","version":"0.1.0","private":true,"type":"module","dependencies":{"@chess-agent/agent-runtime":"workspace:*","@chess-agent/agent-tools":"workspace:*","@chess-agent/chess-domain":"workspace:*","@chess-agent/platform-adapter":"workspace:*","@chess-agent/shared-types":"workspace:*"}}

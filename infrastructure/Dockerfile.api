@@ -1,0 +1,14 @@
+FROM node:24-bookworm-slim AS build
+RUN corepack enable
+WORKDIR /app
+COPY . .
+RUN pnpm install --frozen-lockfile && pnpm check
+RUN pnpm --filter @chess-agent/api... build || pnpm exec tsc -b
+
+FROM node:24-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends stockfish && rm -rf /var/lib/apt/lists/* && corepack enable
+WORKDIR /app
+COPY --from=build /app /app
+ENV NODE_ENV=production STOCKFISH_PATH=/usr/games/stockfish
+CMD ["node", "apps/api/dist/main.js"]
+
