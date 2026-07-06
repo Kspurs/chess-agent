@@ -38,6 +38,7 @@ export interface ApiOptions {
   readonly gameSync?: GameSyncService;
   readonly localSessionToken?: string;
   readonly connectionStatus?: (userId: UserId) => Promise<{ readonly lichessConnected: boolean; readonly username?: string }>;
+  readonly log?: (message: string) => void;
 }
 
 export function createApi(options: ApiOptions): FastifyInstance {
@@ -45,6 +46,17 @@ export function createApi(options: ApiOptions): FastifyInstance {
   const events = options.eventStore ?? new SessionEventStore();
   const owners = new Map<SessionId, UserId>();
   const limiter = new UserRateLimiter(options.rateLimitPerMinute ?? 30, options.now);
+  const startedAt = new Map<string, number>();
+
+  app.addHook("onRequest", async (request) => {
+    startedAt.set(request.id, Date.now());
+    options.log?.(`[api] --> ${request.method} ${request.url.split("?", 1)[0]} request=${request.id}`);
+  });
+  app.addHook("onResponse", async (request, reply) => {
+    const elapsed = Date.now() - (startedAt.get(request.id) ?? Date.now());
+    startedAt.delete(request.id);
+    options.log?.(`[api] <-- ${request.method} ${request.url.split("?", 1)[0]} status=${reply.statusCode} duration=${elapsed}ms request=${request.id}`);
+  });
 
   app.setErrorHandler((error, _request, reply) => {
     const status = error instanceof ApiHttpError ? error.status : 500;
@@ -93,7 +105,11 @@ export function createApi(options: ApiOptions): FastifyInstance {
     if (owner !== undefined && owner !== userId) throw new ApiHttpError(403, "FORBIDDEN", "Session belongs to another user");
     owners.set(sessionId, userId);
 
+    options.log?.(`[agent] start session=${sessionId} request=${request.id}`);
+
     const result = await options.agent.run({ requestId: request.id, userId, sessionId, message });
+    const toolNames = result.messages.flatMap((entry) => entry.role === "assistant" ? (entry.toolCalls ?? []).map((call) => call.name) : []);
+    options.log?.(`[agent] complete session=${sessionId} steps=${result.steps} tools=${toolNames.join(",") || "none"} request=${request.id}`);
     publishToolEvents(events, sessionId, userId, result);
     for (const gameId of activeGameReferences(result)) options.gameSync?.watch(userId, sessionId, gameId, events);
     for (const jobId of startedReviewReferences(result)) options.agent.watchReview?.(userId, sessionId, jobId, events);

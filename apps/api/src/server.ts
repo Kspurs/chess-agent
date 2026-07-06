@@ -99,7 +99,12 @@ export async function createConfiguredApi(config: ServerConfig) {
     policy,
     skills,
     state,
-    state,
+    {
+      write: async (record) => {
+        console.log(`${record.occurredAt} [tool] ${record.tool} ${record.success ? "ok" : `failed code=${record.errorCode ?? "unknown"}`} request=${record.requestId}`);
+        await state.write(record);
+      }
+    },
     config.modelProvider === "ollama" ? 300_000 : 45_000
   );
   const authenticator: Authenticator = {
@@ -123,6 +128,7 @@ export async function createConfiguredApi(config: ServerConfig) {
       const credential = await credentials.get(userId);
       return credential === undefined ? { lichessConnected: false } : { lichessConnected: true, username: credential.username };
     },
+    log: (message) => console.log(`${new Date().toISOString()} ${message}`),
     onInternalError: (error) => console.error("API request failed", error)
   });
 }
