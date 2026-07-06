@@ -1,1 +1,23 @@
-{"name":"@chess-agent/api","version":"0.1.0","private":true,"type":"module","scripts":{"start":"node dist/main.js"},"dependencies":{"@chess-agent/agent-runtime":"workspace:*","@chess-agent/agent-tools":"workspace:*","@chess-agent/chess-domain":"workspace:*","@chess-agent/engine":"workspace:*","@chess-agent/event-protocol":"workspace:*","@chess-agent/platform-adapter":"workspace:*","@chess-agent/puzzle":"workspace:*","@chess-agent/review":"workspace:*","@chess-agent/shared-types":"workspace:*","fastify":"^5.9.0"}}
+{
+  "name": "@chess-agent/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node dist/main.js",
+    "start:local": "node --env-file=../../infrastructure/.env dist/main.js",
+    "lichess:import-token": "node --env-file=../../infrastructure/.env dist/import-lichess-token.js"
+  },
+  "dependencies": {
+    "@chess-agent/agent-runtime": "workspace:*",
+    "@chess-agent/agent-tools": "workspace:*",
+    "@chess-agent/chess-domain": "workspace:*",
+    "@chess-agent/engine": "workspace:*",
+    "@chess-agent/event-protocol": "workspace:*",
+    "@chess-agent/platform-adapter": "workspace:*",
+    "@chess-agent/puzzle": "workspace:*",
+    "@chess-agent/review": "workspace:*",
+    "@chess-agent/shared-types": "workspace:*",
+    "fastify": "^5.9.0"
+  }
+}

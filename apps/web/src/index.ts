@@ -8,10 +8,10 @@ export interface AgentRunResponse {
   };
 }
 
-export async function runAgent(message: string, token: string, sessionId?: string): Promise<AgentRunResponse> {
+export async function runAgent(message: string, sessionId?: string): Promise<AgentRunResponse> {
   const response = await fetch("/v1/agent/runs", {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ message, ...(sessionId === undefined ? {} : { sessionId }) })
   });
   if (!response.ok) throw new Error(await apiError(response));
@@ -20,13 +20,12 @@ export async function runAgent(message: string, token: string, sessionId?: strin
 
 export async function subscribeEvents(
   sessionId: string,
-  token: string,
   onEvent: (event: PlatformEvent) => void,
   signal: AbortSignal,
   after = 0
 ): Promise<void> {
   const response = await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`, {
-    headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" },
+    headers: { accept: "text/event-stream" },
     signal
   });
   if (!response.ok || response.body === null) throw new Error(await apiError(response));
@@ -67,4 +66,3 @@ async function apiError(response: Response): Promise<string> {
     return `Request failed (${response.status})`;
   }
 }
-

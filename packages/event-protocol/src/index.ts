@@ -9,6 +9,17 @@ import type {
 
 export const EVENT_PROTOCOL_VERSION = 1 as const;
 
+export interface ReviewMomentEvent {
+  readonly ply: number;
+  readonly fenBefore: string;
+  readonly playedMove: string;
+  readonly bestMove?: string;
+  readonly lossCentipawns: number;
+  readonly classification: "inaccuracy" | "mistake" | "blunder";
+  readonly themes: readonly string[];
+  readonly bestLine: readonly string[];
+}
+
 interface EventEnvelope<Type extends string, Payload> {
   readonly version: typeof EVENT_PROTOCOL_VERSION;
   readonly id: EventId;
@@ -22,11 +33,20 @@ interface EventEnvelope<Type extends string, Payload> {
 export type PlatformEvent =
   | EventEnvelope<"agent.message.delta", { readonly text: string }>
   | EventEnvelope<"agent.message.completed", { readonly messageId: string }>
-  | EventEnvelope<"board.position_changed", { readonly gameId: GameId; readonly fen: string; readonly lastMove?: string }>
+  | EventEnvelope<"board.position_changed", {
+      readonly gameId: GameId;
+      readonly fen: string;
+      readonly lastMove?: string;
+      readonly moves?: readonly { readonly san: string; readonly uci: string }[];
+      readonly orientation?: "white" | "black";
+      readonly status?: string;
+    }>
   | EventEnvelope<"game.clock_changed", { readonly gameId: GameId; readonly whiteMs: number; readonly blackMs: number; readonly running: "white" | "black" | null }>
   | EventEnvelope<"game.completed", { readonly gameId: GameId; readonly result: string }>
   | EventEnvelope<"analysis.progress", { readonly jobId: JobId; readonly progress: number }>
+  | EventEnvelope<"analysis.failed", { readonly jobId: JobId; readonly message: string }>
   | EventEnvelope<"analysis.completed", { readonly jobId: JobId; readonly reviewId: ReviewId }>
+  | EventEnvelope<"review.completed", { readonly reviewId: ReviewId; readonly gameId: GameId; readonly criticalMoments: readonly ReviewMomentEvent[] }>
   | EventEnvelope<"puzzle.started", { readonly puzzleId: PuzzleId; readonly fen: string; readonly rating: number; readonly themes: readonly string[] }>
   | EventEnvelope<"puzzle.feedback", { readonly puzzleId: PuzzleId; readonly correct: boolean; readonly message: string }>
   | EventEnvelope<"ui.open_panel", { readonly panel: "game" | "review" | "puzzle"; readonly resourceId: string }>;
@@ -56,7 +76,9 @@ const EVENT_TYPES = new Set<PlatformEvent["type"]>([
   "game.clock_changed",
   "game.completed",
   "analysis.progress",
+  "analysis.failed",
   "analysis.completed",
+  "review.completed",
   "puzzle.started",
   "puzzle.feedback",
   "ui.open_panel"

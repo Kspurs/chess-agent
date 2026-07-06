@@ -3,6 +3,7 @@ import {
   ChessRules,
   type ChessGame,
   type Color,
+  type Fen,
   type GameResult,
   type GameStatus,
   type Pgn
@@ -12,6 +13,7 @@ import {
   PlatformError,
   type ChessPlatform,
   type CreateGameOptions,
+  type GameSyncUpdate,
   type VersionedGame
 } from "./index.js";
 
@@ -157,16 +159,16 @@ export class LichessPlatform implements ChessPlatform {
   }
 
   async createGame(options: CreateGameOptions, idempotencyKey: string): Promise<VersionedGame> {
-    if (options.mode !== "computer") {
-      throw new PlatformError("INVALID_STATE", "Lichess human games require a challenge or seek workflow");
-    }
     let pending = this.#createdGames.get(idempotencyKey);
     if (pending === undefined) {
-      pending = this.#createComputerGame(options);
+      pending = options.mode === "computer"
+        ? this.#createComputerGame(options)
+        : this.#createHumanChallenge(options);
       this.#createdGames.set(idempotencyKey, pending);
       pending.catch(() => this.#createdGames.delete(idempotencyKey));
     }
     const id = await pending;
+    if (options.mode === "human") return this.#challengeGame(id, options);
     return this.getGame(id);
   }
 
@@ -180,6 +182,58 @@ export class LichessPlatform implements ChessPlatform {
     });
     const response = await this.#request("/api/challenge/ai", { method: "POST", body: form });
     return extractGameId(await response.json());
+  }
+
+  async #createHumanChallenge(options: CreateGameOptions): Promise<GameId> {
+    if (options.opponentUsername === undefined) {
+      throw new PlatformError("INVALID_STATE", "A Lichess username is required for a human challenge");
+    }
+    const form = new URLSearchParams({ color: options.color, rated: String(options.rated ?? false), variant: "standard" });
+    if (options.daysPerTurn !== undefined) {
+      if (!Number.isInteger(options.daysPerTurn) || options.daysPerTurn < 1 || options.daysPerTurn > 14) {
+        throw new PlatformError("INVALID_STATE", "Correspondence days per turn must be between 1 and 14");
+      }
+      form.set("days", String(options.daysPerTurn));
+    } else {
+      const limit = Math.floor((options.initialMs ?? 600_000) / 1_000);
+      if (!validRealtimeLimit(limit)) {
+        throw new PlatformError("INVALID_STATE", "Lichess clock must be 0, 15, 30, 45, 60, 90, or a whole minute up to 180 minutes");
+      }
+      form.set("clock.limit", String(limit));
+      form.set("clock.increment", String(Math.floor((options.incrementMs ?? 0) / 1_000)));
+    }
+    const response = await this.#request(`/api/challenge/${encodeURIComponent(options.opponentUsername)}`, {
+      method: "POST",
+      body: form
+    });
+    return extractGameId(await response.json());
+  }
+
+  async #challengeGame(id: GameId, options: CreateGameOptions): Promise<VersionedGame> {
+    const rules = new ChessRules();
+    const game: ChessGame = {
+      id,
+      provider: "lichess",
+      variant: "standard",
+      mode: "human",
+      ...(options.color === "white"
+        ? { whiteUserId: this.options.userId }
+        : { blackUserId: this.options.userId }),
+      status: "created",
+      result: "*",
+      currentFen: rules.state().fen,
+      moves: [],
+      ...(options.initialMs === undefined ? {} : {
+        clock: {
+          initialMs: options.initialMs,
+          incrementMs: options.incrementMs ?? 0,
+          whiteMs: options.initialMs,
+          blackMs: options.initialMs,
+          running: null
+        }
+      })
+    };
+    return { game, revision: 0 };
   }
 
   async getGame(gameId: GameId): Promise<VersionedGame> {
@@ -223,11 +277,73 @@ export class LichessPlatform implements ChessPlatform {
     return this.getGame(gameId);
   }
 
+  async offerDraw(gameId: GameId, _userId: UserId, expectedRevision: number): Promise<VersionedGame> {
+    const current = await this.getGame(gameId);
+    assertRevision(current, expectedRevision);
+    await this.#request(`/api/board/game/${encodeURIComponent(gameId)}/draw/yes`, { method: "POST" });
+    return this.getGame(gameId);
+  }
+
+  async respondToDraw(gameId: GameId, _userId: UserId, accept: boolean, expectedRevision: number): Promise<VersionedGame> {
+    const current = await this.getGame(gameId);
+    assertRevision(current, expectedRevision);
+    await this.#request(`/api/board/game/${encodeURIComponent(gameId)}/draw/${accept ? "yes" : "no"}`, { method: "POST" });
+    return this.getGame(gameId);
+  }
+
+  async cancelChallenge(gameId: GameId, _userId: UserId): Promise<void> {
+    await this.#request(`/api/challenge/${encodeURIComponent(gameId)}`, { method: "DELETE" });
+  }
+
+  async requestRematch(gameId: GameId, _userId: UserId): Promise<void> {
+    await this.#request(`/api/board/game/${encodeURIComponent(gameId)}/rematch`, { method: "POST" });
+  }
+
   async exportPgn(gameId: GameId): Promise<Pgn> {
     const response = await this.#request(`/game/export/${encodeURIComponent(gameId)}`, {
       headers: { accept: "application/x-chess-pgn" }
     });
     return await response.text() as Pgn;
+  }
+
+  async watchGame(gameId: GameId, onUpdate: (update: GameSyncUpdate) => void, signal: AbortSignal): Promise<void> {
+    const response = await this.#request(`/api/board/game/stream/${encodeURIComponent(gameId)}`, {
+      headers: { accept: "application/x-ndjson" },
+      signal
+    });
+    if (response.body === null) throw new PlatformError("INVALID_STATE", "Lichess game stream has no body", true);
+    let initialFen: string | undefined;
+    for await (const value of readNdjson(response.body, signal)) {
+      if (!isRecord(value)) continue;
+      const state = value.type === "gameFull" && isRecord(value.state) ? value.state : value;
+      if (value.type === "gameFull") {
+        const variant = isRecord(value.variant) && typeof value.variant.key === "string" ? value.variant.key : "standard";
+        if (variant !== "standard") throw new PlatformError("INVALID_STATE", `Live synchronization does not support ${variant}`);
+        initialFen = typeof value.initialFen === "string" && value.initialFen !== "startpos" ? value.initialFen : undefined;
+      }
+      if (!isRecord(state) || typeof state.moves !== "string") continue;
+      const rules = new ChessRules(initialFen);
+      const moves = state.moves.trim().split(/\s+/).filter(Boolean);
+      const played = moves.map((move) => rules.makeMove(move));
+      const statusName = typeof state.status === "string" ? state.status : "started";
+      const winner = state.winner === "white" || state.winner === "black" ? state.winner : undefined;
+      const status = mapStatus(statusName);
+      const turn = rules.state().turn;
+      const lastMove = moves.at(-1);
+      onUpdate({
+        gameId,
+        revision: moves.length,
+        fen: rules.state().fen as Fen,
+        ...(lastMove === undefined ? {} : { lastMove }),
+        moves: played.map(({ san, uci }) => ({ san, uci })),
+        status,
+        result: mapResult(winner, statusName),
+        ...(typeof state.wtime === "number" ? { whiteMs: state.wtime } : {}),
+        ...(typeof state.btime === "number" ? { blackMs: state.btime } : {}),
+        running: status === "started" ? turn : null
+      });
+      if (status !== "started" && status !== "created") return;
+    }
   }
 
   async #mapGame(value: unknown): Promise<VersionedGame> {
@@ -238,9 +354,10 @@ export class LichessPlatform implements ChessPlatform {
   #mapGameValue(value: unknown, localUsername: string): VersionedGame {
     if (!isRecord(value) || typeof value.id !== "string") throw providerDataError("game id");
     const moves = typeof value.moves === "string" ? value.moves.trim().split(/\s+/).filter(Boolean) : [];
+    const variant = typeof value.variant === "string" ? value.variant : "standard";
     const initialFen = typeof value.initialFen === "string" && value.initialFen !== "startpos" ? value.initialFen : undefined;
     const rules = new ChessRules(initialFen);
-    const played = moves.map((move) => rules.makeMove(move));
+    const played = variant === "standard" ? moves.map((move) => rules.makeMove(move)) : [];
     const players = isRecord(value.players) ? value.players : {};
     const whiteName = playerName(players.white);
     const blackName = playerName(players.black);
@@ -249,6 +366,7 @@ export class LichessPlatform implements ChessPlatform {
     const game: ChessGame = {
       id: value.id as GameId,
       provider: "lichess",
+      variant,
       mode: playerIsAi(players.white) || playerIsAi(players.black) ? "computer" : "human",
       ...(sameUsername(whiteName, localUsername) ? { whiteUserId: this.options.userId } : {}),
       ...(sameUsername(blackName, localUsername) ? { blackUserId: this.options.userId } : {}),
@@ -302,6 +420,25 @@ function parseNdjson(text: string): unknown[] {
   return text.split(/\r?\n/).filter((line) => line.trim().length > 0).map((line) => JSON.parse(line) as unknown);
 }
 
+async function* readNdjson(stream: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncGenerator<unknown> {
+  const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  try {
+    for (;;) {
+      if (signal.aborted) return;
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) if (line.trim()) yield JSON.parse(line) as unknown;
+    }
+    if (buffer.trim()) yield JSON.parse(buffer) as unknown;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function extractGameId(value: unknown): GameId {
   if (!isRecord(value)) throw providerDataError("created game");
   const id = typeof value.id === "string" ? value.id
@@ -324,6 +461,10 @@ function playerIsAi(value: unknown): boolean {
 
 function sameUsername(value: string | undefined, expected: string): boolean {
   return value?.toLocaleLowerCase("en-US") === expected.toLocaleLowerCase("en-US");
+}
+
+function validRealtimeLimit(seconds: number): boolean {
+  return [0, 15, 30, 45, 60, 90].includes(seconds) || (seconds >= 120 && seconds <= 10_800 && seconds % 60 === 0);
 }
 
 function mapStatus(status: string): GameStatus {

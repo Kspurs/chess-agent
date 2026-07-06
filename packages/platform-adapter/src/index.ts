@@ -15,11 +15,27 @@ export interface CreateGameOptions {
   readonly initialMs?: number;
   readonly incrementMs?: number;
   readonly computerLevel?: number;
+  readonly opponentUsername?: string;
+  readonly rated?: boolean;
+  readonly daysPerTurn?: number;
 }
 
 export interface VersionedGame {
   readonly game: ChessGame;
   readonly revision: number;
+}
+
+export interface GameSyncUpdate {
+  readonly gameId: GameId;
+  readonly revision: number;
+  readonly fen: Fen;
+  readonly lastMove?: string;
+  readonly moves: readonly { readonly san: string; readonly uci: string }[];
+  readonly status: ChessGame["status"];
+  readonly result: ChessGame["result"];
+  readonly whiteMs?: number;
+  readonly blackMs?: number;
+  readonly running?: Color | null;
 }
 
 export interface ChessPlatform {
@@ -28,7 +44,12 @@ export interface ChessPlatform {
   listRecentGames(userId: UserId, page: PageRequest): Promise<Page<VersionedGame>>;
   makeMove(gameId: GameId, move: string, expectedRevision: number): Promise<VersionedGame>;
   resign(gameId: GameId, userId: UserId, expectedRevision: number): Promise<VersionedGame>;
+  offerDraw(gameId: GameId, userId: UserId, expectedRevision: number): Promise<VersionedGame>;
+  respondToDraw(gameId: GameId, userId: UserId, accept: boolean, expectedRevision: number): Promise<VersionedGame>;
+  cancelChallenge(gameId: GameId, userId: UserId): Promise<void>;
+  requestRematch(gameId: GameId, userId: UserId): Promise<void>;
   exportPgn(gameId: GameId): Promise<Pgn>;
+  watchGame?(gameId: GameId, onUpdate: (update: GameSyncUpdate) => void, signal: AbortSignal): Promise<void>;
 }
 
 export type PlatformErrorCode = "NOT_FOUND" | "CONFLICT" | "ILLEGAL_MOVE" | "FORBIDDEN" | "INVALID_STATE";
@@ -66,6 +87,7 @@ export class InMemoryChessPlatform implements ChessPlatform {
     const game: ChessGame = {
       id,
       provider: "memory",
+      variant: "standard",
       mode: options.mode,
       ...(isWhite ? { whiteUserId: options.requesterUserId } : { blackUserId: options.requesterUserId }),
       status: "started",
@@ -144,6 +166,31 @@ export class InMemoryChessPlatform implements ChessPlatform {
     return stored.value;
   }
 
+  async offerDraw(gameId: GameId, userId: UserId, expectedRevision: number): Promise<VersionedGame> {
+    const stored = this.#require(gameId);
+    this.#assertRevision(stored, expectedRevision);
+    if (stored.value.game.status !== "started") throw new PlatformError("INVALID_STATE", "game is not active");
+    if (stored.value.game.whiteUserId !== userId && stored.value.game.blackUserId !== userId) throw new PlatformError("FORBIDDEN", "user is not a player");
+    return stored.value;
+  }
+
+  async respondToDraw(gameId: GameId, userId: UserId, _accept: boolean, expectedRevision: number): Promise<VersionedGame> {
+    return this.offerDraw(gameId, userId, expectedRevision);
+  }
+
+  async cancelChallenge(gameId: GameId, userId: UserId): Promise<void> {
+    const stored = this.#require(gameId);
+    if (stored.value.game.status !== "created") throw new PlatformError("INVALID_STATE", "challenge is no longer pending");
+    if (stored.value.game.whiteUserId !== userId && stored.value.game.blackUserId !== userId) throw new PlatformError("FORBIDDEN", "user is not a player");
+    stored.value = { ...stored.value, game: { ...stored.value.game, status: "aborted" } };
+  }
+
+  async requestRematch(gameId: GameId, userId: UserId): Promise<void> {
+    const game = this.#require(gameId).value.game;
+    if (game.status === "started" || game.status === "created") throw new PlatformError("INVALID_STATE", "game is not complete");
+    if (game.whiteUserId !== userId && game.blackUserId !== userId) throw new PlatformError("FORBIDDEN", "user is not a player");
+  }
+
   async exportPgn(gameId: GameId): Promise<Pgn> {
     return this.#require(gameId).pgn;
   }
@@ -164,4 +211,3 @@ export function fenOf(game: VersionedGame): Fen {
 }
 
 export * from "./lichess.js";
-

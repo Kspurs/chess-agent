@@ -43,6 +43,13 @@ export interface ReviewServiceOptions {
   readonly now?: () => Date;
 }
 
+export interface ReviewArtifactRepository {
+  getReview(id: string): Promise<ReviewArtifact | undefined>;
+  saveReview(value: ReviewArtifact): Promise<void>;
+  getReviewJob?(id: string): Promise<{ readonly owner: UserId; readonly job: Job<ReviewArtifact> } | undefined>;
+  saveReviewJob?(id: string, owner: UserId, job: Job<ReviewArtifact>): Promise<void>;
+}
+
 export class GameReviewService {
   readonly #jobs = new Map<JobId, Job<ReviewArtifact>>();
   readonly #reviews = new Map<ReviewId, ReviewArtifact>();
@@ -56,7 +63,8 @@ export class GameReviewService {
   constructor(
     private readonly platform: ChessPlatform,
     private readonly engine: EngineService,
-    options: ReviewServiceOptions = {}
+    options: ReviewServiceOptions = {},
+    private readonly repository?: ReviewArtifactRepository
   ) {
     this.#depth = bounded(options.depth ?? 18, 1, 30, "depth");
     this.#maxMoments = bounded(options.maxCriticalMoments ?? 5, 1, 10, "maxCriticalMoments");
@@ -67,13 +75,18 @@ export class GameReviewService {
 
   async startReview(gameId: GameId, requestedBy: UserId): Promise<{ readonly jobId: JobId }> {
     const jobId = randomUUID() as JobId;
-    this.#jobs.set(jobId, { id: jobId, status: "queued", progress: 0 });
+    await this.#setJob(jobId, requestedBy, { id: jobId, status: "queued", progress: 0 });
     this.#owners.set(jobId, requestedBy);
     void this.#run(jobId, gameId, requestedBy);
     return { jobId };
   }
 
   async getJob(jobId: JobId, requestedBy?: UserId): Promise<Job<ReviewArtifact>> {
+    const persisted = this.#jobs.has(jobId) ? undefined : await this.repository?.getReviewJob?.(jobId);
+    if (persisted !== undefined) {
+      this.#jobs.set(jobId, persisted.job);
+      this.#owners.set(jobId, persisted.owner);
+    }
     const job = this.#jobs.get(jobId);
     if (job === undefined) throw new ReviewServiceError("NOT_FOUND", "Review job was not found");
     if (requestedBy !== undefined && this.#owners.get(jobId) !== requestedBy) throw new ReviewServiceError("FORBIDDEN", "User cannot access this review job");
@@ -81,13 +94,13 @@ export class GameReviewService {
   }
 
   async getReview(reviewId: ReviewId): Promise<ReviewArtifact> {
-    const review = this.#reviews.get(reviewId);
+    const review = this.#reviews.get(reviewId) ?? await this.repository?.getReview(reviewId);
     if (review === undefined) throw new ReviewServiceError("NOT_FOUND", "Review was not found");
     return review;
   }
 
   async #run(jobId: JobId, gameId: GameId, requestedBy: UserId): Promise<void> {
-    this.#jobs.set(jobId, { id: jobId, status: "running", progress: 5 });
+    await this.#setJob(jobId, requestedBy, { id: jobId, status: "running", progress: 5 });
     try {
       const { game } = await this.platform.getGame(gameId);
       assertReviewable(game, requestedBy);
@@ -97,7 +110,7 @@ export class GameReviewService {
       for (let index = 0; index < positions.length; index += 1) {
         const { jobId: engineJobId } = await this.engine.submit({ fen: positions[index] as Fen, depth: this.#depth, multiPv: 2 });
         analyses.push(await this.#waitForAnalysis(engineJobId));
-        this.#jobs.set(jobId, {
+        await this.#setJob(jobId, requestedBy, {
           id: jobId,
           status: "running",
           progress: Math.min(95, 5 + Math.round(((index + 1) / positions.length) * 85))
@@ -114,16 +127,23 @@ export class GameReviewService {
         analyzedPositions: analyses.length
       };
       this.#reviews.set(reviewId, artifact);
-      this.#jobs.set(jobId, { id: jobId, status: "succeeded", progress: 100, result: artifact });
+      await this.repository?.saveReview(artifact);
+      await this.#setJob(jobId, requestedBy, { id: jobId, status: "succeeded", progress: 100, result: artifact });
     } catch (error) {
       const message = error instanceof ReviewServiceError ? error.message : "Game review failed";
-      this.#jobs.set(jobId, {
+      await this.#setJob(jobId, requestedBy, {
         id: jobId,
         status: "failed",
         progress: 100,
         error: { code: "BAD_REQUEST", message, retryable: false }
       });
     }
+  }
+
+  async #setJob(jobId: JobId, owner: UserId, job: Job<ReviewArtifact>): Promise<void> {
+    this.#jobs.set(jobId, job);
+    this.#owners.set(jobId, owner);
+    await this.repository?.saveReviewJob?.(jobId, owner, job);
   }
 
   async #waitForAnalysis(jobId: JobId): Promise<EngineAnalysis> {
@@ -136,7 +156,7 @@ export class GameReviewService {
   }
 }
 
-export type ReviewServiceErrorCode = "NOT_FOUND" | "NOT_COMPLETED" | "FORBIDDEN" | "ENGINE_FAILED";
+export type ReviewServiceErrorCode = "NOT_FOUND" | "NOT_COMPLETED" | "FORBIDDEN" | "ENGINE_FAILED" | "UNSUPPORTED_VARIANT";
 
 export class ReviewServiceError extends Error {
   constructor(readonly code: ReviewServiceErrorCode, message: string) {
@@ -148,6 +168,7 @@ export class ReviewServiceError extends Error {
 function assertReviewable(game: ChessGame, userId: UserId): void {
   if (game.status === "started" || game.status === "created") throw new ReviewServiceError("NOT_COMPLETED", "Only completed games can be reviewed");
   if (game.whiteUserId !== userId && game.blackUserId !== userId) throw new ReviewServiceError("FORBIDDEN", "User cannot review this game");
+  if (game.variant !== "standard") throw new ReviewServiceError("UNSUPPORTED_VARIANT", `Reviews do not yet support ${game.variant} games`);
 }
 
 function positionsFor(game: ChessGame): Fen[] {

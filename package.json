@@ -17,6 +17,8 @@
     "check": "tsc -b --pretty false",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:stockfish": "RUN_STOCKFISH_INTEGRATION=true vitest run services/engine/src/stockfish.integration.test.ts",
+    "test:ollama": "RUN_OLLAMA_INTEGRATION=true vitest run packages/agent-runtime/src/ollama.integration.test.ts",
     "eval": "vitest run evaluations",
     "test:watch": "vitest"
   },

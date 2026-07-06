@@ -10,6 +10,7 @@ services:
     deploy:
       resources:
         limits: { cpus: "2", memory: 1G }
+    volumes: ["api-data:/app/data"]
 
   web:
     build:
@@ -36,4 +37,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
-
+  api-data:

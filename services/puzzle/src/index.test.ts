@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Fen, UciMove } from "@chess-agent/chess-domain";
 import type { PuzzleId, UserId } from "@chess-agent/shared-types";
-import { InMemoryPuzzleRepository, PuzzleService, type PuzzleRecord } from "./index.js";
+import { InMemoryPuzzleRepository, PuzzleService, parseLichessPuzzleCsv, type PuzzleProgressState, type PuzzleRecord } from "./index.js";
 
 const userId = "user_1" as UserId;
 const start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" as Fen;
@@ -42,6 +42,32 @@ describe("PuzzleService", () => {
     const repository = new InMemoryPuzzleRepository();
     expect(() => repository.import([{ ...records[0] as PuzzleRecord, license: "" }])).toThrow(TypeError);
     expect(() => repository.import([{ ...records[0] as PuzzleRecord, solution: ["e2e5" as UciMove] }])).toThrow();
+  });
+
+  it("persists ratings, streaks, attempts, themes, and review dates", async () => {
+    let saved: PuzzleProgressState | undefined;
+    const progress = {
+      loadPuzzleProgress: async () => saved,
+      savePuzzleProgress: async (state: PuzzleProgressState) => { saved = state; }
+    };
+    const repository = new InMemoryPuzzleRepository();
+    repository.import(records);
+    const first = new PuzzleService(repository, () => new Date("2026-07-02T00:00:00.000Z"), progress);
+    const { puzzleId } = await first.createPuzzle({ requestedBy: userId, theme: "opening" });
+    await first.submitMove(userId, puzzleId, "e2e4");
+    await first.submitMove(userId, puzzleId, "g1f3");
+    expect(first.trainingProfile(userId)).toMatchObject({ currentStreak: 1, bestStreak: 1, attempts: 1, themeAccuracy: { opening: 100 } });
+    const restarted = new PuzzleService(repository, () => new Date("2026-07-03T00:00:00.000Z"), progress);
+    await restarted.initialize();
+    expect(restarted.trainingProfile(userId)).toMatchObject({ currentStreak: 1, attempts: 1, dueReviews: 1 });
+  });
+
+  it("imports bounded, provenance-labelled Lichess CSV puzzles", () => {
+    const csv = `abc123,${start},e2e4 e7e5 g1f3,1350,80,90,10,opening development,https://lichess.org/game`;
+    const imported = parseLichessPuzzleCsv(csv, 1);
+    expect(imported).toHaveLength(1);
+    expect(imported[0]).toMatchObject({ id: "abc123", rating: 1350, themes: ["opening", "development"], license: "CC0-1.0" });
+    expect(imported[0]?.solution).toEqual(["e7e5", "g1f3"]);
   });
 });
 

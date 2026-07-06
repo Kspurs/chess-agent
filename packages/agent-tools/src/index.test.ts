@@ -25,7 +25,7 @@ function context(platform = new InMemoryChessPlatform()): ToolContext {
 
 describe("AgentToolExecutor", () => {
   it("publishes strict schemas for every tool", () => {
-    expect(TOOL_DESCRIPTORS).toHaveLength(9);
+    expect(TOOL_DESCRIPTORS).toHaveLength(14);
     for (const tool of TOOL_DESCRIPTORS) {
       expect(tool.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
       expect(tool.inputSchema).toHaveProperty("properties");
@@ -41,6 +41,15 @@ describe("AgentToolExecutor", () => {
     expect(first).toMatchObject({ ok: true });
     expect((second as { value: { game: { id: string } } }).value.game.id)
       .toBe((first as { value: { game: { id: string } } }).value.game.id);
+  });
+
+  it("requires an opponent for human games", async () => {
+    const result = await new AgentToolExecutor(context()).execute({
+      id: "human",
+      name: "create_game",
+      arguments: { mode: "human", color: "white" }
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "BAD_REQUEST" } });
   });
 
   it("normalizes invalid input and writes an audit record", async () => {
@@ -60,6 +69,24 @@ describe("AgentToolExecutor", () => {
     expect(first).toMatchObject({ ok: true });
     const second = await executor.execute({ id: "call_4", name: "make_move", arguments: { gameId: created.game.id, move: "e5", expectedRevision: 1 } });
     expect(second).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+  });
+
+  it("supports explicit draw offers and resignation", async () => {
+    const platform = new InMemoryChessPlatform();
+    const created = await platform.createGame({ requesterUserId: userId, mode: "computer", color: "white" }, "controls");
+    const ctx = context(platform);
+    const executor = new AgentToolExecutor(ctx);
+    await expect(executor.execute({
+      id: "draw",
+      name: "offer_draw",
+      arguments: { gameId: created.game.id, expectedRevision: 0 }
+    })).resolves.toMatchObject({ ok: true });
+    const resigned = await executor.execute({
+      id: "resign",
+      name: "resign_game",
+      arguments: { gameId: created.game.id, expectedRevision: 0 }
+    });
+    expect(resigned).toMatchObject({ ok: true, value: { game: { status: "resigned", result: "0-1" } } });
   });
 
   it("blocks analysis capabilities during active human games", async () => {

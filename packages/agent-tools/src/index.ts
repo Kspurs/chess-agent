@@ -15,6 +15,11 @@ export type ToolName =
   | "create_game"
   | "get_game"
   | "make_move"
+  | "resign_game"
+  | "offer_draw"
+  | "respond_draw"
+  | "cancel_challenge"
+  | "request_rematch"
   | "list_recent_games"
   | "review_game"
   | "get_review"
@@ -91,6 +96,9 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     mode: { type: "string", enum: ["human", "computer"] },
     color: { type: "string", enum: ["white", "black"] },
     computerLevel: { type: "integer", minimum: 1, maximum: 8 },
+    opponentUsername: { type: "string", minLength: 1, maxLength: 64 },
+    rated: { type: "boolean" },
+    daysPerTurn: { type: "integer", minimum: 1, maximum: 14 },
     initialMs: { type: "integer", minimum: 1_000, maximum: 86_400_000 },
     incrementMs: { type: "integer", minimum: 0, maximum: 60_000 }
   }, ["mode", "color"]),
@@ -102,6 +110,25 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     move: { type: "string", minLength: 1, maxLength: 16 },
     expectedRevision: { type: "integer", minimum: 0 }
   }, ["gameId", "move", "expectedRevision"]),
+  descriptor("resign_game", "Resign an active game after the user explicitly requests or confirms resignation.", {
+    gameId: { type: "string", minLength: 1, maxLength: 128 },
+    expectedRevision: { type: "integer", minimum: 0 }
+  }, ["gameId", "expectedRevision"]),
+  descriptor("offer_draw", "Offer a draw in an active game.", {
+    gameId: { type: "string", minLength: 1, maxLength: 128 },
+    expectedRevision: { type: "integer", minimum: 0 }
+  }, ["gameId", "expectedRevision"]),
+  descriptor("respond_draw", "Accept or decline an opponent's draw offer.", {
+    gameId: { type: "string", minLength: 1, maxLength: 128 },
+    accept: { type: "boolean" },
+    expectedRevision: { type: "integer", minimum: 0 }
+  }, ["gameId", "accept", "expectedRevision"]),
+  descriptor("cancel_challenge", "Cancel a pending outgoing challenge.", {
+    gameId: { type: "string", minLength: 1, maxLength: 128 }
+  }, ["gameId"]),
+  descriptor("request_rematch", "Request a rematch after a completed game.", {
+    gameId: { type: "string", minLength: 1, maxLength: 128 }
+  }, ["gameId"]),
   descriptor("list_recent_games", "List the current user's recent games.", {
     cursor: { type: "string", minLength: 1, maxLength: 256 },
     limit: { type: "integer", minimum: 1, maximum: 100 }
@@ -158,6 +185,16 @@ export class AgentToolExecutor {
         const initialMs = optionalInteger(args.initialMs, "initialMs", 1_000, 86_400_000);
         const incrementMs = optionalInteger(args.incrementMs, "incrementMs", 0, 60_000);
         const computerLevel = optionalInteger(args.computerLevel, "computerLevel", 1, 8);
+        const daysPerTurn = optionalInteger(args.daysPerTurn, "daysPerTurn", 1, 14);
+        const opponentUsername = args.opponentUsername === undefined
+          ? undefined
+          : requireString(args.opponentUsername, "opponentUsername", 1, 64);
+        if (mode === "human" && opponentUsername === undefined) {
+          throw new ToolInputError("opponentUsername is required for a human game");
+        }
+        if (args.rated !== undefined && typeof args.rated !== "boolean") {
+          throw new ToolInputError("rated must be a boolean");
+        }
         return this.context.platform.createGame(
           {
             requesterUserId: this.context.userId,
@@ -165,7 +202,10 @@ export class AgentToolExecutor {
             color: color as Color,
             ...(initialMs === undefined ? {} : { initialMs }),
             ...(incrementMs === undefined ? {} : { incrementMs }),
-            ...(computerLevel === undefined ? {} : { computerLevel })
+            ...(computerLevel === undefined ? {} : { computerLevel }),
+            ...(opponentUsername === undefined ? {} : { opponentUsername }),
+            ...(args.rated === undefined ? {} : { rated: args.rated }),
+            ...(daysPerTurn === undefined ? {} : { daysPerTurn })
           },
           `${this.context.requestId}:${call.id}`
         );
@@ -184,6 +224,48 @@ export class AgentToolExecutor {
           requireString(args.move, "move", 1, 16),
           requireInteger(args.expectedRevision, "expectedRevision", 0, Number.MAX_SAFE_INTEGER)
         );
+      }
+      case "resign_game": {
+        const id = gameId(args.gameId);
+        const current = await this.context.platform.getGame(id);
+        assertCanMove(current.game, this.context.userId);
+        return this.context.platform.resign(
+          id,
+          this.context.userId,
+          requireInteger(args.expectedRevision, "expectedRevision", 0, Number.MAX_SAFE_INTEGER)
+        );
+      }
+      case "offer_draw": {
+        const id = gameId(args.gameId);
+        const current = await this.context.platform.getGame(id);
+        assertCanMove(current.game, this.context.userId);
+        return this.context.platform.offerDraw(
+          id,
+          this.context.userId,
+          requireInteger(args.expectedRevision, "expectedRevision", 0, Number.MAX_SAFE_INTEGER)
+        );
+      }
+      case "respond_draw": {
+        const id = gameId(args.gameId);
+        const current = await this.context.platform.getGame(id);
+        assertCanMove(current.game, this.context.userId);
+        if (typeof args.accept !== "boolean") throw new ToolInputError("accept must be a boolean");
+        return this.context.platform.respondToDraw(
+          id,
+          this.context.userId,
+          args.accept,
+          requireInteger(args.expectedRevision, "expectedRevision", 0, Number.MAX_SAFE_INTEGER)
+        );
+      }
+      case "cancel_challenge": {
+        const id = gameId(args.gameId);
+        await this.context.platform.cancelChallenge(id, this.context.userId);
+        return { gameId: id, cancelled: true };
+      }
+      case "request_rematch": {
+        const id = gameId(args.gameId);
+        await this.context.platform.requestRematch(id, this.context.userId);
+        return { gameId: id, requested: true };
       }
       case "list_recent_games": {
         return this.context.platform.listRecentGames(

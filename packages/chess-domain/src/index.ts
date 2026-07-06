@@ -29,6 +29,7 @@ export interface ChessClock {
 export interface ChessGame {
   readonly id: GameId;
   readonly provider: string;
+  readonly variant: string;
   readonly mode: GameMode;
   readonly whiteUserId?: UserId;
   readonly blackUserId?: UserId;

@@ -23,6 +23,22 @@ describe("API", () => {
     await app.close();
   });
 
+  it("creates a secure local browser session and reports connection status", async () => {
+    const userId = "user_1" as UserId;
+    const app = createApi({
+      authenticate: { authenticate: async (header) => header === "Bearer local-secret" ? userId : undefined },
+      agent: { run: async () => result },
+      localSessionToken: "local-secret",
+      connectionStatus: async () => ({ lichessConnected: true, username: "Alice" })
+    });
+    const login = await app.inject({ method: "POST", url: "/v1/local/session" });
+    expect(login.headers["set-cookie"]).toContain("HttpOnly");
+    expect(login.headers["set-cookie"]).toContain("SameSite=Strict");
+    const status = await app.inject({ method: "GET", url: "/v1/connection", headers: { cookie: "chess_agent_session=local-secret" } });
+    expect(status.json()).toEqual({ lichessConnected: true, username: "Alice" });
+    await app.close();
+  });
+
   it("runs the agent and records replayable session events", async () => {
     const userId = "user_1" as UserId;
     const app = createApi({
@@ -63,5 +79,98 @@ describe("API", () => {
     expect(other.statusCode).toBe(404);
     await app.close();
   });
-});
 
+  it("publishes completed review artifacts for the learning UI", async () => {
+    const reviewResult: AgentRunResult = {
+      ...result,
+      messages: [
+        { role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "get_review", arguments: { reviewId: "job_1" } }] },
+        {
+          role: "tool",
+          toolCallId: "call_1",
+          name: "get_review",
+          content: JSON.stringify({
+            ok: true,
+            value: {
+              id: "job_1",
+              status: "succeeded",
+              result: {
+                id: "review_1",
+                gameId: "game_1",
+                criticalMoments: [{
+                  ply: 12,
+                  fenBefore: "8/8/8/8/8/8/8/K6k w - - 0 1",
+                  playedMove: "a1a2",
+                  bestMove: "a1b1",
+                  lossCentipawns: 140,
+                  classification: "mistake",
+                  themes: ["king safety"],
+                  bestLine: ["a1b1"]
+                }]
+              }
+            }
+          })
+        }
+      ]
+    };
+    const app = createApi({
+      authenticate: { authenticate: async () => "user_1" as UserId },
+      agent: { run: async () => reviewResult }
+    });
+    await app.inject({ method: "POST", url: "/v1/agent/runs", headers: { authorization: "token" }, payload: { sessionId: "review", message: "Review it" } });
+    const snapshot = await app.inject({ method: "GET", url: "/v1/sessions/review/events/snapshot", headers: { authorization: "token" } });
+    const completed = snapshot.json().events.find((event: { type: string }) => event.type === "review.completed");
+    expect(completed.payload).toMatchObject({ reviewId: "review_1", gameId: "game_1" });
+    expect(completed.payload.criticalMoments[0]).toMatchObject({ ply: 12, classification: "mistake" });
+    await app.close();
+  });
+
+  it("starts live synchronization for active games returned by tools", async () => {
+    const watched: string[] = [];
+    let closed = false;
+    const gameResult: AgentRunResult = {
+      ...result,
+      messages: [{
+        role: "tool",
+        toolCallId: "call_game",
+        name: "get_game",
+        content: JSON.stringify({ ok: true, value: { game: { id: "game_live", status: "started", currentFen: "8/8/8/8/8/8/8/K6k w - - 0 1", moves: [] } } })
+      }]
+    };
+    const app = createApi({
+      authenticate: { authenticate: async () => "user_1" as UserId },
+      agent: { run: async () => gameResult },
+      gameSync: {
+        watch: (_userId, _sessionId, gameId) => watched.push(gameId),
+        close: async () => { closed = true; }
+      }
+    });
+    await app.inject({ method: "POST", url: "/v1/agent/runs", headers: { authorization: "token" }, payload: { message: "show game" } });
+    expect(watched).toEqual(["game_live"]);
+    await app.close();
+    expect(closed).toBe(true);
+  });
+
+  it("starts automatic progress monitoring for review jobs", async () => {
+    const watched: string[] = [];
+    const reviewStarted: AgentRunResult = {
+      ...result,
+      messages: [{
+        role: "tool",
+        toolCallId: "review_call",
+        name: "review_game",
+        content: JSON.stringify({ ok: true, value: { jobId: "review_job_1" } })
+      }]
+    };
+    const app = createApi({
+      authenticate: { authenticate: async () => "user_1" as UserId },
+      agent: {
+        run: async () => reviewStarted,
+        watchReview: (_userId, _sessionId, jobId) => watched.push(jobId)
+      }
+    });
+    await app.inject({ method: "POST", url: "/v1/agent/runs", headers: { authorization: "token" }, payload: { message: "review" } });
+    expect(watched).toEqual(["review_job_1"]);
+    await app.close();
+  });
+});

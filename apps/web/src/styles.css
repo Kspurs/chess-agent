@@ -9,16 +9,48 @@ button, input { font: inherit; }
 .account > button { color: #dce8bd; background: #2a3124; border: 1px solid #526142; border-radius: 8px; padding: 8px 11px; cursor: pointer; }
 .account > button:disabled { opacity: .4; }
 .mark { color: #b7d26c; font-size: 28px; }
-.token { color: #a9afa2; font-size: 12px; display: flex; gap: 10px; align-items: center; }
-.token input { width: 180px; color: #e9ecdf; background: #22271f; border: 1px solid #3b4336; border-radius: 8px; padding: 8px 10px; }
+.connection { color: #a9afa2; font-size: 12px; }
 .workspace { flex: 1; display: grid; grid-template-columns: minmax(360px, 1.15fr) minmax(320px, .85fr); gap: clamp(24px, 4vw, 64px); padding: clamp(24px, 5vw, 72px); max-width: 1500px; width: 100%; margin: auto; }
 .board-panel { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.clock-row { width: min(70vh, 100%); display: flex; align-items: center; justify-content: space-between; color: #aeb5a5; font-variant-numeric: tabular-nums; }
+.clock-row span { padding: 7px 10px; border-radius: 8px; background: #20241d; }
+.clock-row span.running { color: #171a11; background: #b7d26c; font-weight: 700; }
+.clock-row button { border: 1px solid #4c5741; color: #dce8bd; background: #293126; border-radius: 8px; padding: 7px 10px; cursor: pointer; }
 .board { width: min(70vh, 100%); aspect-ratio: 1; display: grid; grid-template-columns: repeat(8, 1fr); border-radius: 6px; overflow: hidden; box-shadow: 0 24px 70px #0008; }
-.square { display: grid; place-items: center; font-size: clamp(28px, 5.2vw, 68px); line-height: 1; text-shadow: 0 2px 2px #0006; }
+.square { position: relative; border: 0; padding: 0; display: grid; place-items: center; font-size: clamp(28px, 5.2vw, 68px); line-height: 1; text-shadow: 0 2px 2px #0006; cursor: pointer; }
+.square.last-move { box-shadow: inset 0 0 0 999px #e6ce5848; }
+.square.selected { box-shadow: inset 0 0 0 4px #c4e873; }
+.square.legal-target::after { content: ""; width: 24%; aspect-ratio: 1; border-radius: 50%; background: #26371f88; position: absolute; }
+.square.legal-target:has(span:not(:empty))::after { width: 78%; background: transparent; border: 5px solid #26371f88; }
 .light { background: #d8d2b2; }
 .dark { background: #71805b; }
 .position-meta { width: min(70vh, 100%); color: #989e91; font-size: 12px; display: grid; gap: 6px; }
 .position-meta code { overflow: hidden; text-overflow: ellipsis; color: #c9cec1; }
+.learning-card { width: min(70vh, 100%); padding: 14px; border: 1px solid #ffffff16; border-radius: 12px; background: #1b1e19d9; display: grid; gap: 12px; }
+.learning-card > div:first-child { display: flex; justify-content: space-between; gap: 16px; }
+.learning-card span, .learning-card p { color: #aeb5a5; font-size: 13px; margin: 0; }
+.card-actions { display: flex; gap: 8px; }
+.card-actions button, .moment-list button { border: 1px solid #4c5741; color: #dce8bd; background: #293126; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+.moment-list { display: grid; gap: 7px; }
+.moment-list button { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; text-align: left; align-items: center; }
+.moment-list button strong { color: #efb29e; text-transform: capitalize; }
+.moment-list button small { color: #aeb5a5; }
+.game-actions { width: min(70vh, 100%); display: flex; justify-content: flex-end; gap: 8px; }
+.game-actions button { border: 1px solid #4c5741; color: #dce8bd; background: #293126; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+.game-actions button.danger { color: #ffc2b8; border-color: #75433d; background: #3a2421; }
+.promotion-picker { width: min(70vh, 100%); display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; border: 1px solid #ffffff16; border-radius: 10px; background: #1b1e19; }
+.promotion-picker button { min-width: 42px; border: 1px solid #4c5741; color: #f4f5ef; background: #293126; border-radius: 8px; padding: 8px; cursor: pointer; }
+.move-history { width: min(70vh, 100%); max-height: 150px; overflow-y: auto; padding: 10px; border-radius: 10px; background: #191c17; display: grid; grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 4px 12px; }
+.move-history > div { display: grid; grid-template-columns: 28px 1fr 1fr; align-items: center; }
+.move-history span { color: #777e72; font-size: 12px; }
+.move-history button { border: 0; color: #dfe4d6; background: transparent; text-align: left; padding: 4px; cursor: pointer; border-radius: 4px; }
+.move-history button:hover { background: #ffffff12; }
+.analysis-progress { width: min(70vh, 100%); display: grid; gap: 8px; padding: 12px; border-radius: 10px; background: #1b1e19; border: 1px solid #ffffff16; }
+.analysis-progress > div { display: flex; justify-content: space-between; color: #cdd5c3; }
+.analysis-progress progress { width: 100%; accent-color: #b7d26c; }
+.variation-nav { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
+.variation-nav span { text-align: center; }
+.variation-nav button:disabled { opacity: .35; cursor: default; }
 .chat-panel { min-height: 0; border: 1px solid #ffffff15; border-radius: 16px; background: #1b1e19e8; box-shadow: 0 24px 70px #0005; display: flex; flex-direction: column; overflow: hidden; }
 .messages { flex: 1; min-height: 380px; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; }
 .message { max-width: 88%; padding: 12px 14px; border-radius: 12px; line-height: 1.45; white-space: pre-wrap; }
@@ -30,4 +62,4 @@ form { padding: 16px; display: flex; gap: 10px; border-top: 1px solid #ffffff12;
 form input { flex: 1; min-width: 0; color: #f4f5ef; background: #121410; border: 1px solid #3a4035; border-radius: 10px; padding: 12px 14px; }
 form button { border: 0; border-radius: 10px; padding: 0 18px; background: #b7d26c; color: #161a10; font-weight: 700; cursor: pointer; }
 form button:disabled { opacity: .4; cursor: default; }
-@media (max-width: 850px) { .workspace { grid-template-columns: 1fr; } .token { font-size: 0; } .token input { width: 130px; } .messages { min-height: 340px; } }
+@media (max-width: 850px) { .workspace { grid-template-columns: 1fr; } .connection { display: none; } .messages { min-height: 340px; } }

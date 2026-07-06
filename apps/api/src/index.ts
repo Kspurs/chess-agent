@@ -18,6 +18,13 @@ export interface AgentRunRequest {
 
 export interface AgentRunner {
   run(request: AgentRunRequest): Promise<AgentRunResult>;
+  watchReview?(userId: UserId, sessionId: SessionId, jobId: string, events: SessionEventStore): void;
+  close?(): Promise<void>;
+}
+
+export interface GameSyncService {
+  watch(userId: UserId, sessionId: SessionId, gameId: string, events: SessionEventStore): void;
+  close(): Promise<void>;
 }
 
 export interface ApiOptions {
@@ -27,6 +34,10 @@ export interface ApiOptions {
   readonly rateLimitPerMinute?: number;
   readonly now?: () => Date;
   readonly lichessOAuth?: LichessOAuthCoordinator;
+  readonly onInternalError?: (error: unknown) => void;
+  readonly gameSync?: GameSyncService;
+  readonly localSessionToken?: string;
+  readonly connectionStatus?: (userId: UserId) => Promise<{ readonly lichessConnected: boolean; readonly username?: string }>;
 }
 
 export function createApi(options: ApiOptions): FastifyInstance {
@@ -37,12 +48,24 @@ export function createApi(options: ApiOptions): FastifyInstance {
 
   app.setErrorHandler((error, _request, reply) => {
     const status = error instanceof ApiHttpError ? error.status : 500;
+    if (status === 500) options.onInternalError?.(error);
     const code = error instanceof ApiHttpError ? error.code : "INTERNAL";
     const message = status === 500 ? "Internal server error" : error instanceof Error ? error.message : "Request failed";
     void reply.status(status).send({ error: { code, message } });
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+
+  app.post("/v1/local/session", async (_request, reply) => {
+    if (options.localSessionToken === undefined) throw new ApiHttpError(503, "NOT_CONFIGURED", "Local login is not configured");
+    reply.header("set-cookie", `chess_agent_session=${encodeURIComponent(options.localSessionToken)}; HttpOnly; SameSite=Strict; Path=/`);
+    return { ready: true };
+  });
+
+  app.get("/v1/connection", async (request) => {
+    const userId = await requireUser(request, options.authenticate);
+    return options.connectionStatus?.(userId) ?? { lichessConnected: false };
+  });
 
   app.get("/v1/oauth/lichess/start", async (request) => {
     if (options.lichessOAuth === undefined) throw new ApiHttpError(503, "NOT_CONFIGURED", "Lichess OAuth is not configured");
@@ -71,7 +94,9 @@ export function createApi(options: ApiOptions): FastifyInstance {
     owners.set(sessionId, userId);
 
     const result = await options.agent.run({ requestId: request.id, userId, sessionId, message });
-    publishToolEvents(events, sessionId, result);
+    publishToolEvents(events, sessionId, userId, result);
+    for (const gameId of activeGameReferences(result)) options.gameSync?.watch(userId, sessionId, gameId, events);
+    for (const jobId of startedReviewReferences(result)) options.agent.watchReview?.(userId, sessionId, jobId, events);
     events.publish(sessionId, "agent.message.delta", { text: result.message });
     events.publish(sessionId, "agent.message.completed", { messageId: randomUUID() });
     for (const action of result.actions) {
@@ -114,6 +139,11 @@ export function createApi(options: ApiOptions): FastifyInstance {
     }
   );
 
+  app.addHook("onClose", async () => {
+    await options.gameSync?.close();
+    await options.agent.close?.();
+  });
+
   return app;
 }
 
@@ -122,6 +152,10 @@ export * from "./oauth.js";
 export class SessionEventStore {
   readonly #events = new Map<SessionId, PlatformEvent[]>();
   readonly #listeners = new Map<SessionId, Set<(event: PlatformEvent) => void>>();
+
+  constructor(initial: Readonly<Record<string, readonly PlatformEvent[]>> = {}, private readonly persist?: (event: PlatformEvent) => Promise<void>) {
+    for (const [sessionId, values] of Object.entries(initial)) this.#events.set(sessionId as SessionId, [...values]);
+  }
 
   publish<Type extends PlatformEvent["type"]>(sessionId: SessionId, type: Type, payload: Extract<PlatformEvent, { type: Type }>["payload"]): PlatformEvent {
     const values = this.#events.get(sessionId) ?? [];
@@ -136,6 +170,7 @@ export class SessionEventStore {
     } as PlatformEvent;
     values.push(event);
     this.#events.set(sessionId, values.slice(-1_000));
+    void this.persist?.(event).catch(() => undefined);
     for (const listener of this.#listeners.get(sessionId) ?? []) listener(event);
     return event;
   }
@@ -179,9 +214,17 @@ class ApiHttpError extends Error {
 
 async function requireUser(request: FastifyRequest, authenticator: Authenticator): Promise<UserId> {
   const value = request.headers.authorization;
-  const user = await authenticator.authenticate(Array.isArray(value) ? value[0] : value);
+  const header = Array.isArray(value) ? value[0] : value;
+  const cookieToken = parseCookie(request.headers.cookie, "chess_agent_session");
+  const user = await authenticator.authenticate(header ?? (cookieToken === undefined ? undefined : `Bearer ${cookieToken}`));
   if (user === undefined) throw new ApiHttpError(401, "UNAUTHENTICATED", "Authentication required");
   return user;
+}
+
+function parseCookie(header: string | undefined, name: string): string | undefined {
+  const value = header?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
+  if (value === undefined) return undefined;
+  try { return decodeURIComponent(value); } catch { return undefined; }
 }
 
 function requireOwnedSession(value: string, userId: UserId, owners: Map<SessionId, UserId>): SessionId {
@@ -211,7 +254,7 @@ function writeSse(stream: NodeJS.WritableStream, event: PlatformEvent): void {
   stream.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
 }
 
-function publishToolEvents(events: SessionEventStore, sessionId: SessionId, result: AgentRunResult): void {
+function publishToolEvents(events: SessionEventStore, sessionId: SessionId, userId: UserId, result: AgentRunResult): void {
   const calls = new Map<string, { name: string; arguments: unknown }>();
   for (const message of result.messages) {
     if (message.role === "assistant") for (const call of message.toolCalls ?? []) calls.set(call.id, call);
@@ -253,10 +296,18 @@ function publishToolEvents(events: SessionEventStore, sessionId: SessionId, resu
         const record = value as Record<string, unknown>;
         const review = record.result;
         if (record.status === "succeeded" && typeof record.id === "string" && typeof review === "object" && review !== null && typeof (review as Record<string, unknown>).id === "string") {
+          const reviewRecord = review as Record<string, unknown>;
           events.publish(sessionId, "analysis.completed", {
             jobId: record.id as never,
             reviewId: (review as { id: string }).id as never
           });
+          if (typeof reviewRecord.gameId === "string" && Array.isArray(reviewRecord.criticalMoments)) {
+            events.publish(sessionId, "review.completed", {
+              reviewId: reviewRecord.id as never,
+              gameId: reviewRecord.gameId as never,
+              criticalMoments: reviewRecord.criticalMoments as never
+            });
+          }
         }
       }
       const game = (value as Record<string, unknown>).game;
@@ -270,10 +321,46 @@ function publishToolEvents(events: SessionEventStore, sessionId: SessionId, resu
       events.publish(sessionId, "board.position_changed", {
         gameId: record.id as never,
         fen: record.currentFen,
-        ...(typeof lastMove === "string" ? { lastMove } : {})
+        ...(typeof lastMove === "string" ? { lastMove } : {}),
+        moves: moves.flatMap((move) => {
+          if (typeof move !== "object" || move === null) return [];
+          const value = move as Record<string, unknown>;
+          return typeof value.san === "string" && typeof value.uci === "string" ? [{ san: value.san, uci: value.uci }] : [];
+        }),
+        ...(typeof record.status === "string" ? { status: record.status } : {}),
+        ...(record.blackUserId === userId ? { orientation: "black" as const } : { orientation: "white" as const })
       });
     } catch {
       // Tool messages are internal JSON; malformed content simply emits no board event.
     }
   }
+}
+
+function activeGameReferences(result: AgentRunResult): string[] {
+  const ids = new Set<string>();
+  for (const message of result.messages) {
+    if (message.role !== "tool") continue;
+    try {
+      const parsed = JSON.parse(message.content) as { ok?: boolean; value?: { game?: Record<string, unknown> } };
+      const game = parsed.ok ? parsed.value?.game : undefined;
+      if (typeof game?.id === "string" && (game.status === "started" || game.status === "created")) ids.add(game.id);
+    } catch {
+      // Ignore malformed internal tool messages.
+    }
+  }
+  return [...ids];
+}
+
+function startedReviewReferences(result: AgentRunResult): string[] {
+  const ids = new Set<string>();
+  for (const message of result.messages) {
+    if (message.role !== "tool" || message.name !== "review_game") continue;
+    try {
+      const parsed = JSON.parse(message.content) as { ok?: boolean; value?: { jobId?: unknown } };
+      if (parsed.ok && typeof parsed.value?.jobId === "string") ids.add(parsed.value.jobId);
+    } catch {
+      // Ignore malformed internal tool messages.
+    }
+  }
+  return [...ids];
 }

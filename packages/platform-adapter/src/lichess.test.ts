@@ -107,6 +107,17 @@ describe("LichessPlatform", () => {
     expect(secondPage.items[0]?.game.id).toBe("def67890");
   });
 
+  it("lists unsupported variants without applying standard chess rules", async () => {
+    const racingKings = { ...game, variant: "racingKings", moves: "Kh3 Ka3 Kh4" };
+    const platform = new LichessPlatform({
+      credentials,
+      userId,
+      fetch: async () => new Response(`${JSON.stringify(racingKings)}\n`, { status: 200 })
+    });
+    const page = await platform.listRecentGames(userId, { limit: 1 });
+    expect(page.items[0]).toMatchObject({ game: { variant: "racingKings", moves: [] } });
+  });
+
   it("checks revisions before sending moves", async () => {
     const urls: string[] = [];
     const platform = new LichessPlatform({
@@ -121,6 +132,25 @@ describe("LichessPlatform", () => {
     await expect(platform.makeMove("abc12345" as never, "g1f3", 1)).rejects.toMatchObject({ code: "CONFLICT" });
     await platform.makeMove("abc12345" as never, "g1f3", 2);
     expect(urls.some((url) => url.endsWith("/move/g1f3"))).toBe(true);
+  });
+
+  it("streams authoritative positions, clocks, and completion", async () => {
+    const updates: Array<{ revision: number; status: string; result: string; lastMove?: string; whiteMs?: number }> = [];
+    const events = [
+      { type: "gameFull", variant: { key: "standard" }, initialFen: "startpos", state: { type: "gameState", moves: "e2e4", wtime: 299_000, btime: 300_000, status: "started" } },
+      { type: "gameState", moves: "e2e4 e7e5", wtime: 299_000, btime: 298_000, status: "resign", winner: "white" }
+    ];
+    const platform = new LichessPlatform({
+      credentials,
+      userId,
+      fetch: async () => new Response(events.map((event) => JSON.stringify(event)).join("\n"), { status: 200 })
+    });
+    await platform.watchGame("abc12345" as never, (update) => updates.push(update), new AbortController().signal);
+    expect(updates).toMatchObject([
+      { revision: 1, status: "started", lastMove: "e2e4", whiteMs: 299_000 },
+      { revision: 2, status: "resigned", lastMove: "e7e5", whiteMs: 299_000 }
+    ]);
+    expect(updates[1]?.result).toBe("1-0");
   });
 
   it("creates computer games idempotently", async () => {
@@ -141,6 +171,71 @@ describe("LichessPlatform", () => {
     await platform.createGame(options, "request_1");
     await platform.createGame(options, "request_1");
     expect(creates).toBe(1);
+  });
+
+  it("creates direct human challenges idempotently", async () => {
+    let creates = 0;
+    let submittedBody = "";
+    const platform = new LichessPlatform({
+      credentials,
+      userId,
+      fetch: async (input, init) => {
+        expect(String(input)).toContain("/api/challenge/Bob");
+        creates += 1;
+        submittedBody = String(init?.body);
+        return Response.json({ id: "human123", status: "created" });
+      }
+    });
+    const options = {
+      requesterUserId: userId,
+      mode: "human" as const,
+      color: "black" as const,
+      opponentUsername: "Bob",
+      initialMs: 600_000,
+      incrementMs: 5_000,
+      rated: true
+    };
+    const first = await platform.createGame(options, "human-request");
+    const repeated = await platform.createGame(options, "human-request");
+    expect(first).toMatchObject({ game: { id: "human123", mode: "human", status: "created", blackUserId: userId } });
+    expect(repeated.game.id).toBe(first.game.id);
+    expect(creates).toBe(1);
+    expect(submittedBody).toContain("clock.limit=600");
+    expect(submittedBody).toContain("rated=true");
+  });
+
+  it("creates correspondence challenges without realtime clock fields", async () => {
+    let body = "";
+    const platform = new LichessPlatform({
+      credentials,
+      userId,
+      fetch: async (_input, init) => {
+        body = String(init?.body);
+        return Response.json({ id: "correspondence1", status: "created" });
+      }
+    });
+    await platform.createGame({ requesterUserId: userId, mode: "human", color: "white", opponentUsername: "Bob", daysPerTurn: 3 }, "corr");
+    expect(body).toContain("days=3");
+    expect(body).not.toContain("clock.limit");
+  });
+
+  it("calls draw response, cancellation, and rematch endpoints", async () => {
+    const requests: Array<{ url: string; method?: string }> = [];
+    const platform = new LichessPlatform({
+      credentials,
+      userId,
+      fetch: async (input, init) => {
+        const url = String(input);
+        requests.push({ url, ...(init?.method === undefined ? {} : { method: init.method }) });
+        return url.includes("/game/export/") ? Response.json(game) : Response.json({ ok: true });
+      }
+    });
+    await platform.respondToDraw("abc12345" as never, userId, false, 2);
+    await platform.cancelChallenge("pending1" as never, userId);
+    await platform.requestRematch("abc12345" as never, userId);
+    expect(requests.some(({ url, method }) => url.endsWith("/draw/no") && method === "POST")).toBe(true);
+    expect(requests.some(({ url, method }) => url.endsWith("/api/challenge/pending1") && method === "DELETE")).toBe(true);
+    expect(requests.some(({ url, method }) => url.endsWith("/rematch") && method === "POST")).toBe(true);
   });
 
   it("serializes requests and retries rate limits", async () => {

@@ -27,6 +27,29 @@ export interface PuzzleAttempt {
   readonly hintsUsed: number;
   readonly ratingBefore: number;
   readonly ratingAfter: number;
+  readonly themes: readonly string[];
+  readonly nextReviewAt: string;
+}
+
+export interface PuzzleTrainingProfile {
+  readonly rating: number;
+  readonly currentStreak: number;
+  readonly bestStreak: number;
+  readonly attempts: number;
+  readonly dueReviews: number;
+  readonly themeAccuracy: Readonly<Record<string, number>>;
+}
+
+export interface PuzzleProgressState {
+  readonly ratings: Record<string, number>;
+  readonly recent: Record<string, readonly PuzzleId[]>;
+  readonly attempts: readonly PuzzleAttempt[];
+  readonly streaks: Record<string, { readonly current: number; readonly best: number }>;
+}
+
+export interface PuzzleProgressRepository {
+  loadPuzzleProgress(): Promise<PuzzleProgressState | undefined>;
+  savePuzzleProgress(state: PuzzleProgressState): Promise<void>;
 }
 
 export interface PuzzleSubmission {
@@ -61,6 +84,37 @@ export class InMemoryPuzzleRepository implements PuzzleRepository {
   }
 }
 
+/** Imports the public Lichess puzzle CSV format (CC0), bounded for local machines. */
+export function parseLichessPuzzleCsv(csv: string, limit = 50_000): PuzzleRecord[] {
+  if (!Number.isInteger(limit) || limit < 1) throw new RangeError("Puzzle import limit must be positive");
+  const records: PuzzleRecord[] = [];
+  for (const line of csv.split(/\r?\n/)) {
+    if (!line.trim() || records.length >= limit) continue;
+    const [id, fen, rawMoves, rawRating, , , , rawThemes, gameUrl] = line.split(",");
+    const moves = rawMoves?.split(" ").filter(Boolean) ?? [];
+    const rating = Number.parseInt(rawRating ?? "", 10);
+    if (!id || !fen || moves.length < 2 || !Number.isInteger(rating)) continue;
+    try {
+      const rules = new ChessRules(fen);
+      rules.makeMove(parseUciMove(moves[0] as string));
+      const record: PuzzleRecord = {
+        id: id as PuzzleId,
+        initialFen: rules.state().fen,
+        solution: moves.slice(1).map(parseUciMove),
+        rating,
+        themes: (rawThemes ?? "").split(" ").filter(Boolean),
+        source: gameUrl?.trim() || "https://database.lichess.org/#puzzles",
+        license: "CC0-1.0"
+      };
+      validatePuzzle(record);
+      records.push(record);
+    } catch {
+      // Skip malformed or unsupported rows without aborting a large import.
+    }
+  }
+  return records;
+}
+
 interface ActivePuzzle {
   readonly puzzle: PuzzleRecord;
   readonly startedAt: string;
@@ -75,17 +129,32 @@ export class PuzzleService {
   readonly #recent = new Map<UserId, PuzzleId[]>();
   readonly #ratings = new Map<UserId, number>();
   readonly #attempts: PuzzleAttempt[] = [];
+  readonly #streaks = new Map<UserId, { current: number; best: number }>();
+  #initialized = false;
 
   constructor(
     private readonly repository: PuzzleRepository,
-    private readonly now: () => Date = () => new Date()
+    private readonly now: () => Date = () => new Date(),
+    private readonly progress?: PuzzleProgressRepository
   ) {}
+
+  async initialize(): Promise<void> {
+    if (this.#initialized) return;
+    this.#initialized = true;
+    const state = await this.progress?.loadPuzzleProgress();
+    if (state === undefined) return;
+    for (const [userId, rating] of Object.entries(state.ratings)) this.#ratings.set(userId as UserId, rating);
+    for (const [userId, recent] of Object.entries(state.recent)) this.#recent.set(userId as UserId, [...recent]);
+    this.#attempts.push(...state.attempts);
+    for (const [userId, streak] of Object.entries(state.streaks)) this.#streaks.set(userId as UserId, { ...streak });
+  }
 
   async createPuzzle(options: {
     readonly requestedBy: UserId;
     readonly rating?: number;
     readonly theme?: string;
   }): Promise<{ readonly puzzleId: PuzzleId }> {
+    await this.initialize();
     const target = options.rating ?? this.ratingFor(options.requestedBy);
     if (!Number.isInteger(target) || target < 400 || target > 3_500) throw new PuzzleServiceError("INVALID_REQUEST", "Puzzle rating must be from 400 to 3500");
     const recent = new Set(this.#recent.get(options.requestedBy) ?? []);
@@ -94,7 +163,9 @@ export class PuzzleService {
     );
     const candidates = all.filter(({ id }) => !recent.has(id));
     const pool = candidates.length > 0 ? candidates : all;
+    const due = new Set(this.#attempts.filter((attempt) => attempt.userId === options.requestedBy && new Date(attempt.nextReviewAt) <= this.now()).map(({ puzzleId }) => puzzleId));
     const puzzle = [...pool].sort((a, b) =>
+      Number(due.has(b.id)) - Number(due.has(a.id)) ||
       Math.abs(a.rating - target) - Math.abs(b.rating - target) || String(a.id).localeCompare(String(b.id))
     )[0];
     if (puzzle === undefined) throw new PuzzleServiceError("NOT_FOUND", "No puzzle matches the requested filters");
@@ -124,6 +195,7 @@ export class PuzzleService {
   }
 
   async submitMove(userId: UserId, puzzleId: PuzzleId, notation: string): Promise<PuzzleSubmission> {
+    await this.initialize();
     const active = this.#requireActive(userId, puzzleId);
     if (active.completed) throw new PuzzleServiceError("COMPLETED", "Puzzle session is already complete");
     const move = parseUciMove(notation);
@@ -131,10 +203,10 @@ export class PuzzleService {
     try {
       rules.makeMove(move);
     } catch {
-      return this.#finishIncorrect(userId, active, rules.state().fen, "That move is illegal in this position.");
+      return await this.#finishIncorrect(userId, active, rules.state().fen, "That move is illegal in this position.");
     }
     const expected = active.puzzle.solution[active.nextIndex];
-    if (move !== expected) return this.#finishIncorrect(userId, active, rules.state().fen, "That move is legal, but it misses the puzzle idea.");
+    if (move !== expected) return await this.#finishIncorrect(userId, active, rules.state().fen, "That move is legal, but it misses the puzzle idea.");
 
     active.nextIndex += 1;
     let opponentMove: UciMove | undefined;
@@ -144,7 +216,7 @@ export class PuzzleService {
       active.nextIndex += 1;
     }
     const complete = active.nextIndex >= active.puzzle.solution.length;
-    if (complete) this.#finish(userId, active, true);
+    if (complete) await this.#finish(userId, active, true);
     return {
       correct: true,
       complete,
@@ -172,18 +244,43 @@ export class PuzzleService {
     return this.#attempts.filter((attempt) => attempt.userId === userId);
   }
 
-  #finishIncorrect(userId: UserId, active: ActivePuzzle, fen: Fen, message: string): PuzzleSubmission {
-    this.#finish(userId, active, false);
+  trainingProfile(userId: UserId): PuzzleTrainingProfile {
+    const attempts = this.attemptsFor(userId);
+    const streak = this.#streaks.get(userId) ?? { current: 0, best: 0 };
+    const themeTotals = new Map<string, { solved: number; total: number }>();
+    for (const attempt of attempts) for (const theme of attempt.themes) {
+      const value = themeTotals.get(theme) ?? { solved: 0, total: 0 };
+      value.total += 1;
+      if (attempt.solved) value.solved += 1;
+      themeTotals.set(theme, value);
+    }
+    return {
+      rating: this.ratingFor(userId),
+      currentStreak: streak.current,
+      bestStreak: streak.best,
+      attempts: attempts.length,
+      dueReviews: attempts.filter((attempt) => new Date(attempt.nextReviewAt) <= this.now()).length,
+      themeAccuracy: Object.fromEntries([...themeTotals].map(([theme, value]) => [theme, Math.round((value.solved / value.total) * 100)]))
+    };
+  }
+
+  async #finishIncorrect(userId: UserId, active: ActivePuzzle, fen: Fen, message: string): Promise<PuzzleSubmission> {
+    await this.#finish(userId, active, false);
     return { correct: false, complete: true, fen, message };
   }
 
-  #finish(userId: UserId, active: ActivePuzzle, solved: boolean): void {
+  async #finish(userId: UserId, active: ActivePuzzle, solved: boolean): Promise<void> {
     active.completed = true;
     const expected = 1 / (1 + 10 ** ((active.puzzle.rating - active.ratingBefore) / 400));
     const penalty = Math.min(active.hintsUsed * 0.1, 0.3);
     const score = solved ? 1 - penalty : 0;
     const ratingAfter = Math.max(400, Math.min(3_500, Math.round(active.ratingBefore + 24 * (score - expected))));
     this.#ratings.set(userId, ratingAfter);
+    const previousStreak = this.#streaks.get(userId) ?? { current: 0, best: 0 };
+    const current = solved ? previousStreak.current + 1 : 0;
+    this.#streaks.set(userId, { current, best: Math.max(previousStreak.best, current) });
+    const intervalDays = solved ? Math.max(1, Math.min(30, 2 ** Math.min(previousStreak.current, 5))) : 1;
+    const nextReviewAt = new Date(this.now().getTime() + intervalDays * 86_400_000).toISOString();
     this.#attempts.push({
       puzzleId: active.puzzle.id,
       userId,
@@ -192,7 +289,20 @@ export class PuzzleService {
       solved,
       hintsUsed: active.hintsUsed,
       ratingBefore: active.ratingBefore,
-      ratingAfter
+      ratingAfter,
+      themes: active.puzzle.themes,
+      nextReviewAt
+    });
+    await this.#persist();
+  }
+
+  async #persist(): Promise<void> {
+    if (this.progress === undefined) return;
+    await this.progress.savePuzzleProgress({
+      ratings: Object.fromEntries(this.#ratings),
+      recent: Object.fromEntries(this.#recent),
+      attempts: this.#attempts,
+      streaks: Object.fromEntries(this.#streaks)
     });
   }
 
@@ -236,4 +346,3 @@ function positionAt(puzzle: PuzzleRecord, moveCount: number): ChessRules {
 function sessionKey(userId: UserId, puzzleId: PuzzleId): string {
   return `${userId}:${puzzleId}`;
 }
-

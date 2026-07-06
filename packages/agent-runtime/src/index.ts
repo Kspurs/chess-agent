@@ -167,6 +167,7 @@ export class AgentRuntime {
 }
 
 export * from "./openai.js";
+export * from "./ollama.js";
 
 
 export type AgentRuntimeErrorCode = "INVALID_REQUEST" | "INVALID_MODEL_OUTPUT" | "STEP_LIMIT" | "TOKEN_LIMIT" | "TIMEOUT" | "MODEL_FAILURE";

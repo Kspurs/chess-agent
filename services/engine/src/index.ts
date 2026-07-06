@@ -38,13 +38,18 @@ export interface EngineService {
   getJob(jobId: JobId): Promise<Job<EngineAnalysis>>;
 }
 
+export interface EngineAnalysisCache {
+  getAnalysis(key: string): Promise<EngineAnalysis | undefined>;
+  setAnalysis(key: string, value: EngineAnalysis): Promise<void>;
+}
+
 export class StockfishAnalysisService implements EngineService {
   readonly #jobs = new Map<JobId, Job<EngineAnalysis>>();
   readonly #cache = new Map<string, EngineAnalysis>();
   readonly #available: AnalysisWorker[];
   readonly #waiting: Array<(worker: AnalysisWorker) => void> = [];
 
-  constructor(workers: readonly AnalysisWorker[]) {
+  constructor(workers: readonly AnalysisWorker[], private readonly persistentCache?: EngineAnalysisCache) {
     if (workers.length === 0) throw new RangeError("At least one analysis worker is required");
     this.#available = [...workers];
   }
@@ -65,7 +70,7 @@ export class StockfishAnalysisService implements EngineService {
 
   async #run(jobId: JobId, request: AnalysisRequest): Promise<void> {
     const key = cacheKey(request);
-    const cached = this.#cache.get(key);
+    const cached = this.#cache.get(key) ?? await this.persistentCache?.getAnalysis(key);
     if (cached !== undefined) {
       this.#jobs.set(jobId, { id: jobId, status: "succeeded", progress: 100, result: cached });
       return;
@@ -75,6 +80,7 @@ export class StockfishAnalysisService implements EngineService {
     try {
       const result = await worker.analyze(request);
       this.#cache.set(key, result);
+      await this.persistentCache?.setAnalysis(key, result);
       this.#jobs.set(jobId, { id: jobId, status: "succeeded", progress: 100, result });
     } catch {
       this.#jobs.set(jobId, {
@@ -300,4 +306,3 @@ function numberAfter(tokens: readonly string[], key: string): number | undefined
 function processEnvPath(): string {
   return process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
 }
-
